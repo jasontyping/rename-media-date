@@ -1,6 +1,6 @@
 from PIL import Image
 import os
-import datetime
+from datetime import datetime, timezone, timedelta
 import glob
 import sys
 import re
@@ -25,37 +25,51 @@ def filename_has_match(directory, filename):
     return False
 
 def get_media_creation_date(media_path):
+    creation_date = None
+
     try:
         if media_path.lower().endswith(".mp4"):
             parser = createParser(media_path)
-            if not parser:
+            if not parser:  
                 raise ValueError("Unable to parse the MP4 file.")
                 
             metadata = extractMetadata(parser)
             if metadata is None:
                 raise ValueError("Unable to extract metadata from the MP4 file.")
-                
+            
             # Get the creation date from the MP4 metadata
             media_creation_date = metadata.get("creation_date")
             if not media_creation_date:
                 raise ValueError("Media creation date not found in the metadata.")
-            
+
             # Convert the creation date to a datetime object if it's not already
-            if not isinstance(media_creation_date, datetime.datetime):
-                media_creation_date = datetime.datetime.strptime(media_creation_date, "%Y-%m-%dT%H:%M:%S")
-            
-            return media_creation_date
+            if not isinstance(media_creation_date, datetime):
+                media_creation_date = datetime.strptime(media_creation_date, "%Y-%m-%dT%H:%M:%S")
+
+            # MP4 container should always have dates in UTC, according to the standard
+            if media_creation_date.tzinfo == None:
+                media_creation_date = media_creation_date.replace(tzinfo=timezone.utc)
+
+            # Return date in the current time zone
+            creation_date = media_creation_date.astimezone(tz=None)
         else:
             image = Image.open(media_path)
-            exif_data = image._getexif()
-            if exif_data is not None and 36867 in exif_data:
-                date_taken = exif_data[36867]
-                return datetime.datetime.strptime(date_taken, "%Y:%m:%d %H:%M:%S")
+            
+            # Check if this image type has the protected exif method, if so, use it
+            if hasattr(image, "_getexif") and callable(image._getexif):
+                exif_data = image._getexif()
+                creation_date_field_id = 36867
             else:
-                return None
+                exif_data = image.getexif()
+                creation_date_field_id = 306
+
+            if exif_data is not None and creation_date_field_id in exif_data:
+                date_taken = exif_data[creation_date_field_id]
+                creation_date = datetime.strptime(date_taken, "%Y:%m:%d %H:%M:%S")
     except Exception as e:
         print(f"Error: {e}")
-        return None
+
+    return creation_date
 
 def has_timestamp_in_filename(filename):
     # Regular expression pattern to match timestamps at the beginning of the filename
@@ -71,7 +85,7 @@ def save_media_with_datetime(original_path, media_creation_date, destination_dir
         print(f"{original_path} - File does not contain creation date in metadata.")
         return False
 
-    adjusted_datetime = media_creation_date + datetime.timedelta(hours=adjust_hours)
+    adjusted_datetime = media_creation_date + timedelta(hours=adjust_hours)
 
     original_dir, original_filename = os.path.split(original_path)
     if not original_dir:
@@ -127,6 +141,7 @@ def process_media(file_spec, destination_dir=None, adjust_hours=0, simulate=Fals
         total_media_requested += 1
 
         media_creation_date = get_media_creation_date(media_file)
+
         if media_creation_date is not None:
             if save_media_with_datetime(media_file, media_creation_date, destination_dir, adjust_hours, simulate, force):
                 total_media_processed += 1
